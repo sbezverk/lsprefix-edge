@@ -1,0 +1,4 @@
+FROM scratch
+
+COPY ./bin/lsprefix-edge /lsprefix-edge
+ENTRYPOINT ["/lsprefix-edge"]
