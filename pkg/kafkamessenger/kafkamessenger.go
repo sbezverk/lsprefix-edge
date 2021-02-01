@@ -13,8 +13,8 @@ import (
 
 var (
 	topics = map[string]dbclient.CollectionType{
-		kafkanotifier.LSLinkEventTopic: bmp.LSLinkMsg,
-		kafkanotifier.LSNodeEventTopic: bmp.LSNodeMsg,
+		kafkanotifier.LSPrefixEventTopic: bmp.LSPrefixMsg,
+		kafkanotifier.LSNodeEventTopic:   bmp.LSNodeMsg,
 	}
 )
 
@@ -40,7 +40,7 @@ func NewKafkaMessenger(kafkaSrv string, db dbclient.DB) (Srv, error) {
 	}
 
 	config := sarama.NewConfig()
-	config.ClientID = "ls-node-collection"
+	config.ClientID = "ls-prefix-node-collection"
 	config.Consumer.Return.Errors = true
 	config.Version = sarama.V0_11_0_0
 

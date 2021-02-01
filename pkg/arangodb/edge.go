@@ -14,6 +14,7 @@ import (
 )
 
 func (a *arangoDB) lsPrefixHandler(obj *notifier.EventMessage) error {
+	glog.Infof("lsPrefixHandler event for %s action %s", obj.ID, obj.Action)
 	ctx := context.TODO()
 	if obj == nil {
 		return fmt.Errorf("event message is nil")
@@ -39,17 +40,18 @@ func (a *arangoDB) lsPrefixHandler(obj *notifier.EventMessage) error {
 	}
 	switch obj.Action {
 	case "add":
-		fallthrough
-	case "update":
 		if err := a.processEdgeByLSPrefix(ctx, obj.Key, &o); err != nil {
 			return fmt.Errorf("failed to process action %s for edge %s with error: %+v", obj.Action, obj.Key, err)
 		}
+	default:
+		// NOOP
 	}
 
 	return nil
 }
 
 func (a *arangoDB) lsNodeHandler(obj *notifier.EventMessage) error {
+	glog.Infof("lsNpdeHandler event for %s action %s", obj.ID, obj.Action)
 	ctx := context.TODO()
 	if obj == nil {
 		return fmt.Errorf("event message is nil")
@@ -75,11 +77,11 @@ func (a *arangoDB) lsNodeHandler(obj *notifier.EventMessage) error {
 	}
 	switch obj.Action {
 	case "add":
-		fallthrough
-	case "update":
 		if err := a.processEdgeByLSNode(ctx, obj.Key, &o); err != nil {
 			return fmt.Errorf("failed to process action %s for vertex %s with error: %+v", obj.Action, obj.Key, err)
 		}
+	default:
+		// NOOP for update
 	}
 
 	return nil
@@ -101,7 +103,7 @@ func (a *arangoDB) processEdgeByLSPrefix(ctx context.Context, key string, e *mes
 		" filter d.domain_id == " + strconv.Itoa(int(e.DomainID)) +
 		" filter d.protocol_id == " + strconv.Itoa(int(e.ProtocolID))
 	query += " return d"
-	glog.V(6).Infof("Query: %s", query)
+	glog.V(5).Infof("Query: %s", query)
 	ncursor, err := a.db.Query(ctx, query, nil)
 	if err != nil {
 		return err
@@ -118,7 +120,7 @@ func (a *arangoDB) processEdgeByLSPrefix(ctx context.Context, key string, e *mes
 	glog.V(6).Infof("node %s + prefix %s", nm.Key, e.Key)
 
 	ne := lsPrefixNodeEdgeObject{
-		Key:  key + "_" + nm.IGPRouterID,
+		Key:  key,
 		From: mn.ID.String(),
 		To:   e.ID,
 	}
@@ -146,34 +148,36 @@ func (a *arangoDB) processEdgeByLSNode(ctx context.Context, key string, e *messa
 		" filter d.domain_id == " + strconv.Itoa(int(e.DomainID)) +
 		" filter d.protocol_id == " + strconv.Itoa(int(e.ProtocolID))
 	query += " return d"
-	ncursor, err := a.db.Query(ctx, query, nil)
+	glog.V(5).Infof("Query: %s", query)
+	pcursor, err := a.db.Query(ctx, query, nil)
 	if err != nil {
 		return err
 	}
-	defer ncursor.Close()
-	var nm message.LSPrefix
-	mn, err := ncursor.ReadDocument(ctx, &nm)
-	if err != nil {
-		if !driver.IsNoMoreDocuments(err) {
-			return err
+	defer pcursor.Close()
+	for {
+		var pm message.LSPrefix
+		mp, err := pcursor.ReadDocument(ctx, &pm)
+		if err != nil {
+			if !driver.IsNoMoreDocuments(err) {
+				return err
+			}
+			break
 		}
-	}
-
-	glog.V(6).Infof("node %s + prefix %s", e.Key, nm.Key)
-
-	ne := lsPrefixNodeEdgeObject{
-		Key:  key + "_" + nm.IGPRouterID,
-		From: e.ID,
-		To:   mn.ID.String(),
-	}
-
-	if _, err := a.graph.CreateDocument(ctx, &ne); err != nil {
-		if !driver.IsConflict(err) {
-			return err
+		glog.V(5).Infof("node %s + prefix %s", e.Key, pm.Key)
+		ne := lsPrefixNodeEdgeObject{
+			Key:  mp.ID.Key(),
+			From: e.ID,
+			To:   mp.ID.String(),
 		}
-		// The document already exists, updating it with the latest info
-		if _, err := a.graph.UpdateDocument(ctx, ne.Key, &ne); err != nil {
-			return err
+
+		if _, err := a.graph.CreateDocument(ctx, &ne); err != nil {
+			if !driver.IsConflict(err) {
+				return err
+			}
+			// The document already exists, updating it with the latest info
+			if _, err := a.graph.UpdateDocument(ctx, ne.Key, &ne); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -190,9 +194,8 @@ func (a *arangoDB) processLSPrefixRemoval(ctx context.Context, id string) error 
 		return err
 	}
 	defer ncursor.Close()
-	var nm message.LSPrefix
-
 	for {
+		var nm lsPrefixNodeEdgeObject
 		m, err := ncursor.ReadDocument(ctx, &nm)
 		if err != nil {
 			if !driver.IsNoMoreDocuments(err) {
@@ -220,9 +223,9 @@ func (a *arangoDB) processLSNodeRemoval(ctx context.Context, id string) error {
 		return err
 	}
 	defer ncursor.Close()
-	var nm message.LSNode
 
 	for {
+		var nm lsPrefixNodeEdgeObject
 		m, err := ncursor.ReadDocument(ctx, &nm)
 		if err != nil {
 			if !driver.IsNoMoreDocuments(err) {
