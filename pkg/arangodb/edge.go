@@ -172,7 +172,7 @@ func (a *arangoDB) processEdgeByLSNode(ctx context.Context, key string, e *messa
 			return err
 		}
 		// The document already exists, updating it with the latest info
-		if _, err := a.graph.UpdateDocument(ctx, e.Key, &ne); err != nil {
+		if _, err := a.graph.UpdateDocument(ctx, ne.Key, &ne); err != nil {
 			return err
 		}
 	}
