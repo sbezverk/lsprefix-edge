@@ -128,7 +128,7 @@ func (a *arangoDB) loadEdge() error {
 			return err
 		}
 		if err := a.processEdgeByLSPrefix(ctx, meta.Key, &p); err != nil {
-			return err
+			glog.Errorf("Failed to process LSPrefix %s with error: %+v", p.ID, err)
 		}
 	}
 

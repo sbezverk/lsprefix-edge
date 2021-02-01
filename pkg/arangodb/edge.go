@@ -35,15 +35,15 @@ func (a *arangoDB) lsPrefixHandler(obj *notifier.EventMessage) error {
 		if obj.Action != "del" {
 			return fmt.Errorf("document %s not found but Action is not \"del\", possible stale event", obj.Key)
 		}
-		return nil // a.processPrefixRemoval(ctx, obj.Key)
+		return a.processLSPrefixRemoval(ctx, obj.ID)
 	}
 	switch obj.Action {
 	case "add":
 		fallthrough
 	case "update":
-		// if err := a.processEdgeByLSPrefix(ctx, obj.Key, &o); err != nil {
-		// 	return fmt.Errorf("failed to process action %s for edge %s with error: %+v", obj.Action, obj.Key, err)
-		// }
+		if err := a.processEdgeByLSPrefix(ctx, obj.Key, &o); err != nil {
+			return fmt.Errorf("failed to process action %s for edge %s with error: %+v", obj.Action, obj.Key, err)
+		}
 	}
 
 	return nil
@@ -71,15 +71,15 @@ func (a *arangoDB) lsNodeHandler(obj *notifier.EventMessage) error {
 		if obj.Action != "del" {
 			return fmt.Errorf("document %s not found but Action is not \"del\", possible stale event", obj.Key)
 		}
-		return nil // a.processNodeRemoval(ctx, obj.Key)
+		return a.processLSNodeRemoval(ctx, obj.ID)
 	}
 	switch obj.Action {
 	case "add":
 		fallthrough
 	case "update":
-		// if err := a.processEdgeByLSNode(ctx, obj.Key, &o); err != nil {
-		// 	return fmt.Errorf("failed to process action %s for vertex %s with error: %+v", obj.Action, obj.Key, err)
-		// }
+		if err := a.processEdgeByLSNode(ctx, obj.Key, &o); err != nil {
+			return fmt.Errorf("failed to process action %s for vertex %s with error: %+v", obj.Action, obj.Key, err)
+		}
 	}
 
 	return nil
@@ -101,6 +101,7 @@ func (a *arangoDB) processEdgeByLSPrefix(ctx context.Context, key string, e *mes
 		" filter d.domain_id == " + strconv.Itoa(int(e.DomainID)) +
 		" filter d.protocol_id == " + strconv.Itoa(int(e.ProtocolID))
 	query += " return d"
+	glog.V(6).Infof("Query: %s", query)
 	ncursor, err := a.db.Query(ctx, query, nil)
 	if err != nil {
 		return err
@@ -113,23 +114,6 @@ func (a *arangoDB) processEdgeByLSPrefix(ctx context.Context, key string, e *mes
 			return err
 		}
 	}
-	// query = "FOR d IN " + a.vertex.Name() +
-	// 	" filter d.igp_router_id == " + "\"" + e.RemoteIGPRouterID + "\"" +
-	// 	" filter d.domain_id == " + strconv.Itoa(int(e.DomainID)) +
-	// 	" filter d.protocol_id == " + strconv.Itoa(int(e.ProtocolID))
-	// query += " return d"
-	// rcursor, err := a.db.Query(ctx, query, nil)
-	// if err != nil {
-	// 	return err
-	// }
-	// defer rcursor.Close()
-	// var rn message.LSNode
-	// rm, err := rcursor.ReadDocument(ctx, &rn)
-	// if err != nil {
-	// 	if !driver.IsNoMoreDocuments(err) {
-	// 		return err
-	// 	}
-	// }
 
 	glog.V(6).Infof("node %s + prefix %s", nm.Key, e.Key)
 
@@ -137,6 +121,50 @@ func (a *arangoDB) processEdgeByLSPrefix(ctx context.Context, key string, e *mes
 		Key:  key + "_" + nm.IGPRouterID,
 		From: mn.ID.String(),
 		To:   e.ID,
+	}
+
+	if _, err := a.graph.CreateDocument(ctx, &ne); err != nil {
+		if !driver.IsConflict(err) {
+			return err
+		}
+		// The document already exists, updating it with the latest info
+		if _, err := a.graph.UpdateDocument(ctx, ne.Key, &ne); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (a *arangoDB) processEdgeByLSNode(ctx context.Context, key string, e *message.LSNode) error {
+	if e.ProtocolID == base.BGP {
+		// EPE Case cannot be processed because LS Node collection does not have BGP routers
+		return nil
+	}
+	query := "FOR d IN " + a.prefix.Name() +
+		" filter d.igp_router_id == " + "\"" + e.IGPRouterID + "\"" +
+		" filter d.domain_id == " + strconv.Itoa(int(e.DomainID)) +
+		" filter d.protocol_id == " + strconv.Itoa(int(e.ProtocolID))
+	query += " return d"
+	ncursor, err := a.db.Query(ctx, query, nil)
+	if err != nil {
+		return err
+	}
+	defer ncursor.Close()
+	var nm message.LSPrefix
+	mn, err := ncursor.ReadDocument(ctx, &nm)
+	if err != nil {
+		if !driver.IsNoMoreDocuments(err) {
+			return err
+		}
+	}
+
+	glog.V(6).Infof("node %s + prefix %s", e.Key, nm.Key)
+
+	ne := lsPrefixNodeEdgeObject{
+		Key:  key + "_" + nm.IGPRouterID,
+		From: e.ID,
+		To:   mn.ID.String(),
 	}
 
 	if _, err := a.graph.CreateDocument(ctx, &ne); err != nil {
@@ -152,108 +180,62 @@ func (a *arangoDB) processEdgeByLSPrefix(ctx context.Context, key string, e *mes
 	return nil
 }
 
-// func (a *arangoDB) processVertex(ctx context.Context, key string, e *message.LSNode) error {
-// 	// Check if there is an edge with matching to LSNode's e.IGPRouterID, e.AreaID, e.DomainID and e.ProtocolID
-// 	query := "FOR d IN " + a.vertex.Name() +
-// 		" filter d.igp_router_id == " + "\"" + e.IGPRouterID + "\"" +
-// 		" filter d.area_id == " + e.AreaID +
-// 		" filter d.domain_id == " + strconv.Itoa(int(e.DomainID)) +
-// 		" filter d.protocol_id == " + strconv.Itoa(int(e.ProtocolID))
-// 	query += " return d"
-// 	lcursor, err := a.db.Query(ctx, query, nil)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	defer lcursor.Close()
-// 	var ln message.LSLink
-// 	lm, err := lcursor.ReadDocument(ctx, &ln)
-// 	if err != nil {
-// 		if !driver.IsNoMoreDocuments(err) {
-// 			return err
-// 		}
-// 	}
-// 	// Check if there is a second link LS Link with with matching to LSNode's e.IGPRouterID, e.AreaID, e.DomainID and e.ProtocolID
-// 	query = "FOR d IN " + a.vertex.Name() +
-// 		" filter d.remote_igp_router_id == " + "\"" + e.IGPRouterID + "\"" +
-// 		" filter d.area_id == " + e.AreaID +
-// 		" filter d.domain_id == " + strconv.Itoa(int(e.DomainID)) +
-// 		" filter d.protocol_id == " + strconv.Itoa(int(e.ProtocolID))
-// 	query += " return d"
-// 	rcursor, err := a.db.Query(ctx, query, nil)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	defer rcursor.Close()
-// 	var rn message.LSNode
-// 	rm, err := rcursor.ReadDocument(ctx, &rn)
-// 	if err != nil {
-// 		if !driver.IsNoMoreDocuments(err) {
-// 			return err
-// 		}
-// 	}
+// processLSPrefixRemoval removes records from Edge collection which are referring to deleted LSPrefix
+func (a *arangoDB) processLSPrefixRemoval(ctx context.Context, id string) error {
+	query := "FOR d IN " + a.graph.Name() +
+		" filter d._to == " + "\"" + id + "\""
+	query += " return d"
+	ncursor, err := a.db.Query(ctx, query, nil)
+	if err != nil {
+		return err
+	}
+	defer ncursor.Close()
+	var nm message.LSPrefix
 
-// 	glog.V(6).Infof("Local link: %s", lm.ID.Key())
-// 	glog.V(6).Infof("Remote link: %s", rm.ID.Key())
+	for {
+		m, err := ncursor.ReadDocument(ctx, &nm)
+		if err != nil {
+			if !driver.IsNoMoreDocuments(err) {
+				return err
+			}
+			break
+		}
+		if _, err := a.graph.RemoveDocument(ctx, m.ID.Key()); err != nil {
+			if !driver.IsNotFound(err) {
+				return err
+			}
+		}
+	}
 
-// 	ne := lsNodeEdgeObject{
-// 		Key:  key,
-// 		From: lm.ID.String(),
-// 		To:   rm.ID.String(),
-// 	}
+	return nil
+}
 
-// 	if _, err := a.graph.CreateDocument(ctx, &ne); err != nil {
-// 		if !driver.IsConflict(err) {
-// 			return err
-// 		}
-// 		// The document already exists, updating it with the latest info
-// 		if _, err := a.graph.UpdateDocument(ctx, e.Key, &ne); err != nil {
-// 			return err
-// 		}
-// 	}
+// processLSNodeRemoval removes records from Edge collection which are referring to deleted LSNode
+func (a *arangoDB) processLSNodeRemoval(ctx context.Context, id string) error {
+	query := "FOR d IN " + a.graph.Name() +
+		" filter d._from == " + "\"" + id + "\""
+	query += " return d"
+	ncursor, err := a.db.Query(ctx, query, nil)
+	if err != nil {
+		return err
+	}
+	defer ncursor.Close()
+	var nm message.LSNode
 
-// 	return nil
-// }
+	for {
+		m, err := ncursor.ReadDocument(ctx, &nm)
+		if err != nil {
+			if !driver.IsNoMoreDocuments(err) {
+				return err
+			}
+			break
+		}
+		if _, err := a.graph.RemoveDocument(ctx, m.ID.Key()); err != nil {
+			if !driver.IsNotFound(err) {
+				return err
+			}
+		}
+	}
 
-// // processVertexRemoval removes a record from Node's graph collection
-// // since the key matches in both collections (Nodes and Nodes' Graph) deleting the record directly.
-// func (a *arangoDB) processVertexRemoval(ctx context.Context, key string) error {
-// 	if _, err := a.graph.RemoveDocument(ctx, key); err != nil {
-// 		if !driver.IsNotFound(err) {
-// 			return err
-// 		}
-// 		glog.Warningf("Document %s/%s was requested to be delete but it does not exist", a.graph.Name(), key)
-// 		return nil
-// 	}
-
-// 	return nil
-// }
-
-// // processEdgeRemoval removes all documents where removed Edge (LS Link) is referenced in "_to" or "_from"
-// func (a *arangoDB) processEdgeRemoval(ctx context.Context, key string) error {
-// 	query := "FOR d IN" + a.graph.Name() +
-// 		" filter d._to == " + "\"" + key + "\"" + " OR" + " d._from == " + "\"" + key + "\"" +
-// 		" return d"
-// 	cursor, err := a.db.Query(ctx, query, nil)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	defer cursor.Close()
-// 	for {
-// 		var p lsNodeEdgeObject
-// 		meta, err := cursor.ReadDocument(ctx, &p)
-// 		if driver.IsNoMoreDocuments(err) {
-// 			break
-// 		} else if err != nil {
-// 			return err
-// 		}
-// 		if _, err := a.graph.RemoveDocument(ctx, meta.ID.Key()); err != nil {
-// 			if !driver.IsNotFound(err) {
-// 				return err
-// 			}
-// 			glog.Warningf("Document %s/%s was requested to be delete but it does not exist", a.graph.Name(), key)
-// 			return nil
-// 		}
-// 	}
-
-// 	return nil
-// }
+	return nil
+}
